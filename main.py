@@ -5,10 +5,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def main():
-    agent_name = os.getenv("OPENAI_API_KEY")
-    message = f"Hi, {agent_name}"
+    api_key = os.getenv("OPENAI_API_KEY")
+    print(api_key)
+    agent_name = "666"
+    message = f"Hi, I'm {agent_name}"
     print(message)
+
     
+
 
 if __name__ == "__main__":
     main()
