@@ -1,11 +1,17 @@
 import os
 import time
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from dotenv import load_dotenv
 
 # 載入環境變數
 load_dotenv()
+
+def build_system_prompt() -> str:
+    """建立系統提示字串。"""
+    system_text = "你是課堂程式助教。請使用繁體中文；先給一句重點結論，必要時再補一句說明。"
+    nick = "法門超人"
+    return f"{system_text}\n\n【本場次顯示名稱】 {nick}"
 
 def main():
     # 讀取配置
@@ -27,9 +33,7 @@ def main():
     )
 
     # 建立記憶體串列 (本題稱 messages)
-    messages = [
-        SystemMessage(content="你是一個聰明的助理，請一律使用「繁體中文」回答使用者的所有問題。")
-    ]
+    messages = []
 
     print(f"🚀 {agent_name} 已就緒！")
     print(f"--- 提示：輸入 'exit' 或 'q' 離開對話，輸入 'clear' 重置記憶 ---")
@@ -58,7 +62,12 @@ def main():
             human_message = HumanMessage(content=message)
 
             # 2. 組合成 context_messages 送給 LLM
-            context_messages = [*messages, human_message]
+            system_message = SystemMessage(content=build_system_prompt())
+            context_messages = [
+                system_message,
+                *messages,
+                human_message
+            ]
 
             # 呼叫模型 (使用串流輸出)
             try:
