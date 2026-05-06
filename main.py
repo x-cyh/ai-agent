@@ -26,8 +26,8 @@ def main():
         temperature=0.7
     )
 
-    # 建立初始對話歷史 (使用 SystemMessage 強制規定語系)
-    history = [
+    # 建立記憶體串列 (本題稱 messages)
+    messages = [
         SystemMessage(content="你是一個聰明的助理，請一律使用「繁體中文」回答使用者的所有問題。")
     ]
 
@@ -50,28 +50,34 @@ def main():
 
             # 處理重置記憶
             if message.lower() == 'clear':
-                history = [SystemMessage(content="你是一個親切的助理，請一律使用「繁體中文」回答使用者的所有問題。")]
+                messages = [SystemMessage(content="你是一個親切的助理，請一律使用「繁體中文」回答使用者的所有問題。")]
                 print(f"\n{agent_name}: 記憶已重置。")
                 continue
 
-            # 將使用者訊息加入歷史
-            history.append(HumanMessage(content=message))
+            # 1. 先把本輪字句建成 human_message
+            human_message = HumanMessage(content=message)
+
+            # 2. 組合成 context_messages 送給 LLM
+            context_messages = [*messages, human_message]
 
             # 呼叫模型 (使用串流輸出)
             try:
                 print(f"\n{agent_name}: ", end="", flush=True)
                 full_response = ""
                 
-                # 用 for 迴圈讓字流暢吐出
-                for chunk in llm.stream(history):
+                # 3. 累積回應的 AIChunkMessage (串流中)
+                for chunk in llm.stream(context_messages):
                     if chunk.content:
                         for char in chunk.content:
                             print(char, end="", flush=True)
                             full_response += char
-                            time.sleep(0.02)  # 調整速度，數字越小越快
+                            time.sleep(0.01)  # 稍微加快速度提升體驗
                 
                 print()  # 結束後換行
-                history.append(AIMessage(content=full_response))
+
+                # 4. 串流結束後，合併成 AIMessage 並與 human_message 存入 messages 中
+                messages.append(human_message)
+                messages.append(AIMessage(content=full_response))
                 
             except Exception as e:
                 print(f"\n❌ 發生錯誤: {e}")
