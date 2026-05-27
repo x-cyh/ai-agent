@@ -34,6 +34,12 @@ venv.bak/
 # uv
 .uv/
 
+# Chainlit runtime artifacts
+.chainlit/translations/
+.chainlit_uploads/
+.files/
+chainlit*.log
+
 # IDEs
 .vscode/
 .idea/

@@ -1,0 +1,50 @@
+/* Chainlit 內容區整體字體：更接近 Markdown / 文件渲染風格 */
+:root {
+  --cl-font-family: "Inter", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --cl-mono-font-family: "JetBrains Mono", "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+}
+
+/* 一般文字 */
+body,
+.cl-message,
+.cl-message-content,
+.cl-markdown {
+  font-family: var(--cl-font-family) !important;
+  letter-spacing: 0.01em;
+  line-height: 1.7;
+}
+
+/* Markdown 標題 */
+.cl-markdown h1,
+.cl-markdown h2,
+.cl-markdown h3,
+.cl-markdown h4,
+.cl-markdown h5,
+.cl-markdown h6 {
+  font-family: var(--cl-font-family) !important;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+/* Markdown 內的程式碼字體 */
+.cl-markdown code,
+.cl-markdown pre,
+code,
+pre {
+  font-family: var(--cl-mono-font-family) !important;
+}
+
+/* 數學公式字體 */
+.katex,
+.katex-display {
+  font-family: "Latin Modern Math", "STIX Two Math", "Cambria Math", "Times New Roman", serif !important;
+}
+
+.katex-display {
+  font-size: 1.08em;
+  line-height: 1.5;
+}
+
+.katex {
+  font-size: 1em;
+}
