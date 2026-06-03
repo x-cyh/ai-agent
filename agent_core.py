@@ -56,7 +56,7 @@ def get_identity() -> str:
         "【依賴管理】本專案用 uv 管理套件；新增 Python 依賴請在專案根 exec "
         "uv add <套件名>，不要用 pip install。"
     )
-    nick = "法鬥超人"
+    nick = "泥巴"
     return f"{system_text}\n\n【本場次顯示名稱】{nick}"
 
 
