@@ -40,6 +40,12 @@ venv.bak/
 .files/
 chainlit*.log
 
+# Streamlit Studio runtime artifacts
+studio_shell/.agent_core_activated
+studio_shell/sessions/
+studio_shell/uploads/
+studio_shell/workspace/user_settings.json
+
 # IDEs
 .vscode/
 .idea/
