@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from openai import OpenAIError
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -33,6 +34,42 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
+
+def _extract_openai_error_code(exc: BaseException) -> str:
+    code = getattr(exc, "code", None)
+    if code:
+        return str(code)
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        nested = body.get("error")
+        if isinstance(nested, dict) and nested.get("code"):
+            return str(nested["code"])
+        if body.get("code"):
+            return str(body["code"])
+    text = str(exc)
+    if "insufficient_quota" in text:
+        return "insufficient_quota"
+    if "rate_limit" in text or "429" in text:
+        return "rate_limit"
+    return ""
+
+
+def _friendly_openai_error(exc: BaseException) -> RuntimeError:
+    code = _extract_openai_error_code(exc)
+    if code == "insufficient_quota":
+        return RuntimeError(
+            "OpenAI API 額度不足或帳單狀態未啟用；請到 OpenAI Platform 檢查 Billing / Usage，"
+            "或在 .env 換成仍有額度的 OPENAI_API_KEY。"
+        )
+    if code == "rate_limit":
+        return RuntimeError(
+            "OpenAI API 目前被限流；請稍後再試，或調低請求頻率 / 換用有更高額度的專案。"
+        )
+    return RuntimeError(f"OpenAI API 呼叫失敗：{exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1120,9 +1157,10 @@ class Agent:
             else 0
         )
         llm = ChatOpenAI(
-            model="gpt-5.4-mini", 
+            model=os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
             api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0.2)
+            temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.2")),
+        )
         llm_tools = llm.bind_tools(TOOLS)
         return cls(
             session_path=resolved_path,
@@ -1152,9 +1190,13 @@ class Agent:
         human_for_send = build_human_message_for_current_turn(user_text, image_rel)
 
         prev_consolidated = self.last_consolidated
-        self.last_consolidated = ensure_budget_before_react(
-            self.llm, self.history, self.last_consolidated, history_human
-        )
+        try:
+            self.last_consolidated = ensure_budget_before_react(
+                self.llm, self.history, self.last_consolidated, history_human
+            )
+        except OpenAIError as e:
+            raise _friendly_openai_error(e) from e
+
         if self.last_consolidated != prev_consolidated:
             if self.session_meta is None:
                 self.session_meta = _default_metadata()
@@ -1168,14 +1210,17 @@ class Agent:
         system_text = build_system_prompt()
         past = self.history[self.last_consolidated:]
 
-        final_text, turn_messages = run_react_turn(
-            self.llm_tools,
-            system_text,
-            past,
-            human_for_send,
-            history_human,
-            on_token=on_token,
-        )
+        try:
+            final_text, turn_messages = run_react_turn(
+                self.llm_tools,
+                system_text,
+                past,
+                human_for_send,
+                history_human,
+                on_token=on_token,
+            )
+        except OpenAIError as e:
+            raise _friendly_openai_error(e) from e
 
         self.history.extend(turn_messages)
 
