@@ -1,0 +1,2 @@
+# 目前此 skill 僅使用 Python 標準庫。
+# 若未來要加入匯出 PDF 或更進階的 Markdown 處理，再補充套件即可。
