@@ -17,9 +17,9 @@ def page_shell(
 ) -> None:
     """Left column UI + right column Agent. render_main returns extra_context for Agent.
 
-    on_assistant_reply: optional callback invoked after each Agent reply.
-        Signature: (assistant_text: str, user_text: str) -> None
-        Use this to auto-update page state (e.g. append to progress notes).
+    on_assistant_reply(answer, user_text) is called after each assistant reply
+    finishes streaming, before st.rerun(). Use it to parse structured markers
+    (e.g. 【NOTES】/【FACTS】) and update page state.
     """
 
     main, side = st.columns([5, 3], gap="large")

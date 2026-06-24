@@ -1,0 +1,13 @@
+{
+  "vcr-imagegen": "ok",
+  "pptx": "ok",
+  "vcr_key": "ok",
+  "node": "ok",
+  "pptxgenjs": "ok",
+  "playwright": "ok",
+  "sharp": "ok",
+  "python_pptx": "ok",
+  "python_docx": "ok",
+  "checked_at": "2026-06-24T16:30:00",
+  "project_agents_path": ".agents/skills/"
+}

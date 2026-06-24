@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
 import shutil
 import uuid
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,7 @@ from typing import Any
 import streamlit as st
 from openai_tts import Settings, stream_tts_play
 from openai_tts.settings import MAX_TTS_SPEED, MIN_TTS_SPEED
+from st_multimodal_chatinput import multimodal_chatinput
 
 SHELL_ROOT = Path(__file__).parent
 PROJECT_ROOT = SHELL_ROOT.parent
@@ -21,11 +25,26 @@ SESSION_DIR = PEAS_WORKSPACE / "sessions"
 SCRIPTS_DIR = SHELL_ROOT / "scripts"
 CHAT_IMAGE_DIR = PEAS_WORKSPACE / "uploads" / "chat_images"
 TTS_CONFIG_PATH = PEAS_AGENT_HOME / "tts.json"
+LLM_CONFIG_PATH = PEAS_AGENT_HOME / "config.json"
+REASONING_EFFORT_OPTIONS = ("none", "low", "medium", "high")
+REASONING_EFFORT_LABELS = {
+    "none": "關閉 (none)",
+    "low": "快速 (low)",
+    "medium": "平衡 (medium)",
+    "high": "深度 (high)",
+}
 MIGRATION_MARKER_PATH = PEAS_AGENT_HOME / ".studio_migration_done"
 LEGACY_USER_SETTINGS_PATH = SHELL_ROOT / "workspace" / "user_settings.json"
 LEGACY_SESSION_DIR = SHELL_ROOT / "sessions"
 AGENT_ACTIVATION_MARKER_PATH = SHELL_ROOT / ".agent_core_activated"
 MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024
+CHAT_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+MIME_TO_CHAT_IMAGE_SUFFIX = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+}
 TTS_VOICE_OPTIONS = [
     "alloy",
     "ash",
@@ -50,6 +69,10 @@ TTS_VOICE_LABELS: dict[str, str] = {
     "sage": "女聲 · 沉穩、較內斂",
     "shimmer": "女聲 · 輕快、偏年輕",
 }
+LEGACY_HARDCODED_TTS_INSTRUCTIONS = "用台灣繁體中文說話。"
+LEGACY_HARDCODED_TTS_SPEED = 1.0
+DEFAULT_TTS_BASE_URL = "https://ai.vanscoding.com/v1"
+DEFAULT_TTS_MODEL = "openai@gpt-4o-mini-tts"
 
 
 def _tts_voice_label(voice_id: str) -> str:
@@ -59,64 +82,8 @@ def _tts_voice_label(voice_id: str) -> str:
     return voice_id
 
 
-# 為「人生故事書」頁面提供精準的 parent-story 採訪指引。
-# 優先動態讀取 .agents/skills/parent-story/SKILL.md（改 skill 檔即生效），
-# 讀不到時才 fallback 到下方 hard-coded 字串，避免影響其他頁面。
-PARENT_STORY_SKILL_PATH = PROJECT_ROOT / ".agents" / "skills" / "parent-story" / "SKILL.md"
-
-PARENT_STORY_PROMPT_PREFIX = """
-【parent-story 採訪指引】
-你正在協助使用者留下一段人生故事給孩子或家人。請嚴格遵守以下流程：
-
-1. 先找到「主線」：如果還沒確認，問「如果今天只能先留下一段故事，您最想從哪一件事開始說起？」
-2. 主線確認後，一次只問一題，依序追問：
-   a. 背景：那時候幾歲？家庭／工作／生活狀態是什麼？
-   b. 開端：這件事是怎麼開始的？什麼變化讓它展開？
-   c. 衝突：最難熬的是什麼？最卡住的地方在哪裡？
-   d. 決定：最後做了什麼選擇？為什麼那樣決定？
-   e. 結果：後來結果怎麼樣？有什麼收穫、遺憾或代價？
-   f. 意義：回頭看，這件事改變了什麼？如何塑造了現在的自己？
-   g. 留給孩子的話：希望孩子記住哪個畫面或心意？最後一句叮嚀是什麼？
-3. 回答太短時，優先溫和補問細節：「可以多說一點當時發生了什麼嗎？」、「那個畫面裡還有誰？」
-4. 回答太抽象時，拉回具體事件：「最辛苦的那一天發生了什麼？」
-5. 主線尚未成形前，不要跳到支線；不要在故事還沒講完整前急著總結。
-6. 資訊足夠後，整理輸出：故事標題、主線摘要、故事正文、留給孩子的話；並將結果用 write_file 工具寫到 story_outputs/ 目錄的 .md 檔案，檔名使用「{timestamp}_{故事標題}.md」的格式。
-""".strip()
-
-
 def _display_path(path: Path) -> str:
     return path.resolve().as_posix()
-
-
-def _load_parent_story_skill_body() -> str | None:
-    """讀取 parent-story SKILL.md 並去掉 frontmatter，回傳內文。
-
-    找不到檔案或讀取失敗時回傳 None，由 caller 決定是否 fallback。
-    """
-    path = PARENT_STORY_SKILL_PATH
-    if not path.is_file():
-        return None
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    # 去掉 YAML frontmatter（--- 開頭到下一個 --- 為止）
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) >= 3:
-            text = parts[2]
-    return text.strip() or None
-
-
-def _parent_story_prefix_for_page(page_name: str) -> str:
-    if page_name not in ("人生故事書", "Parent Story"):
-        return ""
-
-    body = _load_parent_story_skill_body()
-    if body:
-        return f"【parent-story skill 內容】\n{body}"
-    return PARENT_STORY_PROMPT_PREFIX
 
 
 def _ensure_peas_dirs() -> None:
@@ -125,14 +92,37 @@ def _ensure_peas_dirs() -> None:
 
 
 def _default_tts_config() -> dict[str, object]:
+    env = Settings()
     return {
         "api_key": "",
-        "base_url": "",
+        "base_url": DEFAULT_TTS_BASE_URL,
+        "model": DEFAULT_TTS_MODEL,
         "enabled": False,
-        "voice": "nova",
-        "instructions": "用台灣繁體中文說話。",
-        "speed": 1.0,
+        "voice": env.voice,
+        "instructions": env.instructions,
+        "speed": env.speed,
     }
+
+
+def _is_legacy_hardcoded_tts_config(config: dict[str, object]) -> bool:
+    try:
+        speed = float(config.get("speed", 0))
+    except (TypeError, ValueError):
+        return False
+    return (
+        speed == LEGACY_HARDCODED_TTS_SPEED
+        and str(config.get("instructions", "")) == LEGACY_HARDCODED_TTS_INSTRUCTIONS
+    )
+
+
+def _upgrade_legacy_hardcoded_tts_config(config: dict[str, object]) -> dict[str, object]:
+    defaults = _default_tts_config()
+    upgraded = dict(config)
+    upgraded["instructions"] = defaults["instructions"]
+    upgraded["speed"] = defaults["speed"]
+    if str(upgraded.get("voice", "")) not in TTS_VOICE_OPTIONS:
+        upgraded["voice"] = defaults["voice"]
+    return upgraded
 
 
 def _normalize_tts_config(
@@ -151,13 +141,17 @@ def _normalize_tts_config(
 
     enabled = raw.get("enabled", raw.get("tts_enabled", defaults["enabled"]))
     instructions = raw.get("instructions", raw.get("tts_instructions", defaults["instructions"]))
+    instructions = str(instructions).strip() or str(defaults["instructions"])
+    base_url = str(raw.get("base_url", defaults["base_url"])).strip() or str(defaults["base_url"])
+    model = str(raw.get("model", defaults["model"])).strip() or str(defaults["model"])
 
     return {
         "api_key": str(raw.get("api_key", defaults["api_key"])),
-        "base_url": str(raw.get("base_url", defaults["base_url"])),
+        "base_url": base_url,
+        "model": model,
         "enabled": bool(enabled),
         "voice": voice,
-        "instructions": str(instructions),
+        "instructions": instructions,
         "speed": speed,
     }
 
@@ -177,6 +171,12 @@ def _read_tts_config() -> tuple[dict[str, object], bool]:
         return defaults, True
 
     normalized = _normalize_tts_config(raw, defaults)
+    if _is_legacy_hardcoded_tts_config(normalized):
+        normalized = _normalize_tts_config(
+            _upgrade_legacy_hardcoded_tts_config(normalized),
+            defaults,
+        )
+        return normalized, True
     return normalized, raw != normalized
 
 
@@ -218,7 +218,8 @@ def _config_from_tts_widgets() -> dict[str, object]:
     current = _load_tts_config()
     return {
         "api_key": current.get("api_key", ""),
-        "base_url": current.get("base_url", ""),
+        "base_url": current.get("base_url", DEFAULT_TTS_BASE_URL),
+        "model": current.get("model", DEFAULT_TTS_MODEL),
         "enabled": bool(st.session_state.get("studio_tts_enabled", False)),
         "voice": str(st.session_state.get("studio_tts_voice", "")),
         "instructions": str(st.session_state.get("studio_tts_instructions", "")),
@@ -290,10 +291,18 @@ def _build_tts_settings_for_playback() -> Settings | None:
     api_key = str(cfg.get("api_key", "")).strip()
     if not api_key:
         return None
-    return Settings(
+    model = str(cfg.get("model", "")).strip()
+    if not model or "@" not in model:
+        return None
+    base_url = str(cfg.get("base_url", "")).strip()
+    return replace(
+        Settings(),
         api_key=api_key,
+        base_url=base_url,
+        model=model,
         voice=str(st.session_state["studio_tts_voice"]),
-        instructions=str(st.session_state["studio_tts_instructions"]).strip(),
+        instructions=str(st.session_state["studio_tts_instructions"]).strip()
+        or Settings().instructions,
         speed=float(st.session_state["studio_tts_speed"]),
     )
 
@@ -303,7 +312,7 @@ def _render_tts_settings_ui(*, settings_error: str | None = None) -> None:
         st.warning(settings_error)
 
     voice_options = list(TTS_VOICE_OPTIONS)
-    current_voice = str(st.session_state.get("studio_tts_voice", "nova"))
+    current_voice = str(st.session_state.get("studio_tts_voice", Settings().voice))
     if current_voice not in voice_options:
         voice_options.insert(0, current_voice)
 
@@ -340,6 +349,151 @@ def _render_tts_settings_ui(*, settings_error: str | None = None) -> None:
             "文字回答完成後才開始 TTS；語音錯誤不會影響文字顯示。"
         )
         persist_error = _persist_tts_preferences_if_changed()
+        if persist_error:
+            st.warning(persist_error)
+
+
+def _default_reasoning_config() -> dict[str, str]:
+    return {"effort": "medium", "summary": "auto"}
+
+
+def _read_llm_config() -> dict[str, object]:
+    if not LLM_CONFIG_PATH.is_file():
+        return {}
+    try:
+        raw = json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _normalize_reasoning_effort(value: object) -> str:
+    effort = str(value or "").strip().lower()
+    if effort in REASONING_EFFORT_OPTIONS:
+        return effort
+    return _default_reasoning_config()["effort"]
+
+
+def _load_reasoning_effort() -> str:
+    cfg = _read_llm_config()
+    llm = cfg.get("llm")
+    if not isinstance(llm, dict):
+        return _default_reasoning_config()["effort"]
+    reasoning = llm.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return _default_reasoning_config()["effort"]
+    return _normalize_reasoning_effort(reasoning.get("effort"))
+
+
+def _load_use_responses_api() -> bool:
+    cfg = _read_llm_config()
+    llm = cfg.get("llm")
+    if not isinstance(llm, dict):
+        return True
+    return llm.get("use_responses_api") is not False
+
+
+def _save_reasoning_effort(effort: str) -> str | None:
+    normalized = _normalize_reasoning_effort(effort)
+    cfg = _read_llm_config()
+    llm = cfg.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        cfg["llm"] = llm
+    reasoning = llm.get("reasoning")
+    if not isinstance(reasoning, dict):
+        reasoning = dict(_default_reasoning_config())
+        llm["reasoning"] = reasoning
+    reasoning["effort"] = normalized
+    try:
+        LLM_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LLM_CONFIG_PATH.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return f"無法寫入 LLM 設定檔：{exc}"
+    return None
+
+
+def _reload_reasoning_llm_config(agent: Any) -> str | None:
+    reload = getattr(agent, "reload_llm_config", None)
+    if reload is None:
+        return "請先升級 peas-agent-core（需支援 Agent.reload_llm_config）。"
+    try:
+        reload()
+    except Exception as exc:
+        return f"套用推理深度失敗：`{exc}`"
+    return None
+
+
+def _apply_reasoning_effort_change(new_effort: str) -> str | None:
+    error = _save_reasoning_effort(new_effort)
+    if error:
+        return error
+    agent = st.session_state.get("studio_agent")
+    if agent is not None:
+        return _reload_reasoning_llm_config(agent)
+    return None
+
+
+def _reload_reasoning_preferences_from_file() -> None:
+    effort = _load_reasoning_effort()
+    st.session_state["studio_reasoning_effort"] = effort
+    st.session_state["_studio_reasoning_snapshot"] = effort
+
+
+def _persist_reasoning_effort_if_changed() -> str | None:
+    if "studio_reasoning_effort" not in st.session_state:
+        return None
+    previous = st.session_state.get("_studio_reasoning_snapshot")
+    if previous is None:
+        return None
+    current = _normalize_reasoning_effort(st.session_state.get("studio_reasoning_effort"))
+    if previous == current:
+        return None
+    reload_error = _apply_reasoning_effort_change(current)
+    if reload_error:
+        return reload_error
+    st.session_state["_studio_reasoning_snapshot"] = current
+    return None
+
+
+def _sync_reasoning_preferences_for_page(page_name: str) -> str | None:
+    persist_error = _persist_reasoning_effort_if_changed()
+    if persist_error is not None:
+        return persist_error
+    _reload_reasoning_preferences_from_file()
+    st.session_state["_studio_reasoning_page_name"] = page_name
+    return None
+
+
+def _prepare_reasoning_preferences(page_name: str) -> str | None:
+    return _sync_reasoning_preferences_for_page(page_name)
+
+
+def _render_reasoning_settings_ui(*, settings_error: str | None = None) -> None:
+    if settings_error:
+        st.warning(settings_error)
+
+    responses_enabled = _load_use_responses_api()
+    with st.expander("推理深度", expanded=False):
+        st.selectbox(
+            "推理深度",
+            REASONING_EFFORT_OPTIONS,
+            format_func=lambda value: REASONING_EFFORT_LABELS.get(value, value),
+            key="studio_reasoning_effort",
+            disabled=not responses_enabled,
+            help="控制 Responses API 的 reasoning.effort；切換後立即套用。",
+        )
+        if not responses_enabled:
+            st.caption("需於 config.json 啟用 use_responses_api 才有效。")
+        else:
+            st.caption(
+                "關閉 (none) 可加速回覆；若 API 回 400 請改回 low 或確認模型是否支援 none。"
+            )
+        st.caption(f"LLM 設定檔：`{LLM_CONFIG_PATH}`")
+        persist_error = _persist_reasoning_effort_if_changed()
         if persist_error:
             st.warning(persist_error)
 
@@ -388,26 +542,23 @@ def _maybe_migrate_legacy_data() -> str | None:
 
 
 def studio_base_context() -> str:
+    pages_dir = _display_path(SHELL_ROOT / "pages")
+    data_dir = _display_path(SHELL_ROOT / "data")
     return "\n".join([
-        "使用者身份、名稱、角色、偏好以 system prompt 中的 USER.md 為準；【目前頁面狀態】與【左欄暱稱】只代表左欄表單快照，不得取代 USER.md 身份。",
-        f"Streamlit 專案根目錄：{_display_path(PROJECT_ROOT)}",
-        f"左欄 UI 程式：{_display_path(SHELL_ROOT / 'pages')}（每頁一個檔案）",
-        "左欄各頁以 `render_main()` 收集 widget 狀態，用 `format_extra_context()` 組成 extra context 並 return；"
-        "`page_shell` 會在使用者送訊息時附上【目前頁面狀態】。",
-        "extra context 以本次 render 的 widget 值為準，不可假設讀檔一定等同目前畫面；禁止在 extra context 寫【任務】或指令語氣。",
-        f"共享狀態檔目錄：{_display_path(SHELL_ROOT / 'data')}（與 pages 同層）。",
-        "檔名慣例：`{page_slug}.json`（page_slug = 頁面名稱小寫，Playground → playground.json）。",
-        "讀寫 Studio 共享 JSON 時，`read_file`/`write_file`/`edit_file` 必須使用【共享資料檔】或上述目錄的完整絕對路徑。",
-        "勿用 `studio_shell/data/...` 相對路徑（相對路徑會解析到 ~/.peas-agent/workspace，找不到專案檔）。",
-        "左欄 `render_main()` 從該檔讀取初始值餵 widget。",
-        "左欄程式讀寫 JSON 用 `load_page_data()` / `save_page_data()`（`shell_ui.py`）；Agent 不可呼叫這兩個 helper。",
-        "Agent 要改左欄狀態時：先 `read_file`【共享資料檔】，再用 `edit_file`/`write_file` 更新同一 JSON；勿直接改 Streamlit widget。",
-        "有共享檔的頁面，extra context 應含【共享資料檔】完整路徑（可用 `shared_data_path()`）。",
-        f"內建 JSON 模板目錄：{_display_path(SHELL_ROOT / 'data')}。",
-        "內建欄位：home.json → nickname(str), goal(str)；playground.json → nickname, mood(str), energy(int 1-10), event(str), count(int)。",
-        "Agent 寫入時須保留既有鍵名與型別，只改目標欄位；新頁面建立 JSON 時，鍵名須與該頁 `save_page_data({...})` 一致，可複製同目錄既有模板再改。",
-        "使用者新增 page 時：建立 `pages/N_xxx.py` + `data/{page_slug}.json` 模板（含初始鍵值），左欄 load/save 與 extra context 欄位對齊。",
-        "參考範例：`pages/1_Home.py`、`data/home.json`；`pages/2_Playground.py`、`data/playground.json`。",
+        "【身份】USER.md 為準；【目前頁面狀態】/【左欄*】僅表單快照，非使用者身份。",
+        f"【路徑】專案根：{_display_path(PROJECT_ROOT)}；左欄頁面：{pages_dir}；"
+        f"共享 JSON：{data_dir}/{{slug}}.json（slug=頁名小寫）。",
+        "【左欄↔Agent】render_main → format_extra_context，每則訊息附【目前頁面狀態】。"
+        "以 widget 快照為準，讀檔可能落後；extra context 禁【任務】/指令語氣。",
+        "【Agent 改左欄】read_file【共享資料檔】→ edit_file/write_file 更新 JSON；"
+        "禁 load_page_data/save_page_data、禁改 widget；保留既有鍵名與型別（不確定 schema 先 read_file 模板）。",
+        "【新增頁】"
+        "① studio_shell/pages/{N}_{Name}.py（必須 數字_名稱.py，例 4_Order.py；Order.py 等不符合者側欄忽略）"
+        "② studio_shell/data/{slug}.json "
+        "③ load/save 與 extra context 對齊。"
+        "N 取 pages/ 現有最大數字+1（內建 1–3，自訂通常從 4 起）。"
+        "勿改 app.py；建檔後請使用者 Rerun。"
+        "參考 studio_shell/pages/1_Home.py + studio_shell/data/home.json。",
     ])
 
 
@@ -429,23 +580,134 @@ def _remove_activation_marker() -> None:
         AGENT_ACTIVATION_MARKER_PATH.unlink()
 
 
-def _save_uploaded_chat_image(uploaded_file) -> tuple[str | None, str | None]:
-    if uploaded_file is None:
-        return None, None
+def _suffix_from_mime(mime: str) -> str | None:
+    normalized = mime.lower().split(";", 1)[0].strip()
+    return MIME_TO_CHAT_IMAGE_SUFFIX.get(normalized)
 
-    data = uploaded_file.getvalue()
+
+def _suffix_from_filename(name: str) -> str | None:
+    suffix = Path(name).suffix.lower()
+    if suffix in CHAT_IMAGE_SUFFIXES:
+        return suffix
+    return None
+
+
+def _validate_chat_image(data: bytes, suffix: str) -> str | None:
     if len(data) > MAX_CHAT_IMAGE_BYTES:
-        return None, "圖片超過 5 MB，請先壓縮後再上傳。"
+        return "圖片超過 5 MB，請先壓縮後再上傳。"
+    if suffix not in CHAT_IMAGE_SUFFIXES:
+        return "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+    return None
 
-    suffix = Path(uploaded_file.name).suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+def _save_chat_image_bytes(data: bytes, *, suffix: str) -> tuple[str | None, str | None]:
+    error = _validate_chat_image(data, suffix)
+    if error:
+        return None, error
 
     _ensure_peas_dirs()
     filename = f"chat_image_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}{suffix}"
     target = CHAT_IMAGE_DIR / filename
     target.write_bytes(data)
-    return target.relative_to(PEAS_WORKSPACE).as_posix(), None
+    return str(target.resolve()), None
+
+
+def _pending_image_from_bytes(*, data: bytes, suffix: str, name: str, mime: str) -> tuple[dict[str, Any] | None, str | None]:
+    error = _validate_chat_image(data, suffix)
+    if error:
+        return None, error
+    return {"bytes": data, "suffix": suffix, "name": name, "mime": mime}, None
+
+
+def _pending_image_from_multimodal_file(file_info: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    mime = str(file_info.get("type", "") or "")
+    if not mime.startswith("image/"):
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+    suffix = _suffix_from_mime(mime) or _suffix_from_filename(str(file_info.get("name", "") or ""))
+    if suffix is None:
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+    raw_content = file_info.get("content", "")
+    if not raw_content:
+        return None, "無法讀取貼上的圖片內容。"
+
+    try:
+        data = base64.b64decode(raw_content)
+    except (ValueError, TypeError):
+        return None, "無法讀取貼上的圖片內容。"
+
+    name = str(file_info.get("name", "") or f"pasted{suffix}")
+    return _pending_image_from_bytes(data=data, suffix=suffix, name=name, mime=mime)
+
+
+def _multimodal_user_text(chatinput: dict[str, Any]) -> str:
+    return str(chatinput.get("textInput") or chatinput.get("text") or "").strip()
+
+
+def _pending_image_from_data_url(
+    data_url: str,
+    *,
+    index: int = 0,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not data_url.startswith("data:") or "," not in data_url:
+        return None, "無法讀取貼上的圖片內容。"
+
+    header, encoded = data_url.split(",", 1)
+    mime = header.split(":", 1)[1].split(";", 1)[0].strip().lower()
+    suffix = _suffix_from_mime(mime)
+    if suffix is None:
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+    try:
+        data = base64.b64decode(encoded)
+    except (ValueError, TypeError):
+        return None, "無法讀取貼上的圖片內容。"
+
+    name = f"pasted_{index + 1}{suffix}"
+    return _pending_image_from_bytes(data=data, suffix=suffix, name=name, mime=mime)
+
+
+def _resolve_submission_image(
+    chatinput: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    multimodal_files = chatinput.get("uploadedFiles") or []
+    image_files = [
+        file_info
+        for file_info in multimodal_files
+        if str(file_info.get("type", "") or "").startswith("image/")
+    ]
+    if image_files:
+        return _pending_image_from_multimodal_file(image_files[-1])
+
+    data_urls = chatinput.get("images") or []
+    if data_urls:
+        return _pending_image_from_data_url(str(data_urls[-1]), index=len(data_urls) - 1)
+
+    return None, None
+
+
+def _chat_submission_token(chatinput: dict[str, Any]) -> str:
+    text = _multimodal_user_text(chatinput)
+    files = chatinput.get("uploadedFiles") or []
+    image_names = sorted(
+        str(file_info.get("name", "") or "")
+        for file_info in files
+        if str(file_info.get("type", "") or "").startswith("image/")
+    )
+    if not image_names:
+        image_names = [f"data-url:{idx}" for idx, _ in enumerate(chatinput.get("images") or [])]
+    return f"{text}\0{','.join(image_names)}"
+
+
+def _save_uploaded_chat_image(uploaded_file) -> tuple[str | None, str | None]:
+    if uploaded_file is None:
+        return None, None
+
+    suffix = _suffix_from_filename(uploaded_file.name)
+    if suffix is None:
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+    return _save_chat_image_bytes(uploaded_file.getvalue(), suffix=suffix)
 
 
 def _new_session_path() -> Path:
@@ -566,6 +828,61 @@ def _load_session_history(path: Path) -> list[tuple[str, str]]:
     return history
 
 
+REASONING_ROUND_SEPARATOR = "\n\n---\n\n"
+TOOL_RUN_PLACEHOLDER = "（執行工具中…）"
+
+
+def _commit_reasoning_round(segments: list[str], current_parts: list[str]) -> None:
+    text = "".join(current_parts).strip()
+    if text:
+        segments.append(text)
+    current_parts.clear()
+
+
+def _merged_reasoning_text(segments: list[str], current_parts: list[str]) -> str:
+    parts = [segment for segment in segments if segment.strip()]
+    current = "".join(current_parts).strip()
+    if current:
+        parts.append(current)
+    return REASONING_ROUND_SEPARATOR.join(parts)
+
+
+def _render_reasoning_expander(
+    reasoning_slot: Any,
+    text: str,
+    *,
+    expanded: bool,
+    stream_ui: dict[str, Any],
+) -> None:
+    if not text.strip():
+        return
+    stream_ui["visible"] = True
+    stream_ui["expanded"] = expanded
+    with reasoning_slot.container():
+        with st.expander("思考過程", expanded=expanded):
+            if expanded:
+                stream_ui["reasoning_ph"] = st.empty()
+                stream_ui["reasoning_ph"].markdown(text)
+            else:
+                stream_ui["reasoning_ph"] = None
+                st.markdown(text)
+
+
+def _parse_history_entry(entry: tuple[str, ...]) -> tuple[str, str, str]:
+    role = entry[0]
+    text = entry[1] if len(entry) > 1 else ""
+    reasoning = entry[2] if len(entry) > 2 else ""
+    return role, text, reasoning
+
+
+def _render_history_message(role: str, text: str, *, reasoning: str = "") -> None:
+    with st.chat_message(role):
+        if role == "assistant" and reasoning.strip():
+            with st.expander("思考過程", expanded=False):
+                st.markdown(reasoning)
+        st.markdown(text)
+
+
 def _set_current_session(path: Path) -> None:
     session_name = _session_name(path)
     st.session_state["session_name"] = session_name
@@ -616,6 +933,7 @@ def _create_agent_for_session(session_name: str) -> Any:
         ) from exc
     return Agent.create(
         session_name=session_name,
+        project_root=PROJECT_ROOT,
         host_context=studio_base_context(),
     )
 
@@ -664,7 +982,7 @@ def render_chat_panel(
     *,
     extra_context: str = "",
     page_name: str = "",
-    on_assistant_reply=None,
+    on_assistant_reply: Callable[[str, str], None] | None = None,
 ) -> None:
     migration_message = _maybe_migrate_legacy_data()
     if migration_message:
@@ -686,6 +1004,7 @@ def render_chat_panel(
             (
                 "assistant",
                 "請先按「啟用 Agent」。啟用後，我會讀取左欄傳來的頁面狀態，再回答你的問題。",
+                "",
             )
         ]
 
@@ -742,11 +1061,13 @@ def render_chat_panel(
             st.rerun()
 
     settings_error = _prepare_tts_preferences(page_name)
+    reasoning_error = _prepare_reasoning_preferences(page_name)
 
     current_session = st.session_state.get("session_name")
     if not current_session:
         st.caption("尚無對話紀錄，請按 **+** 新增對話。")
         _render_tts_settings_ui(settings_error=settings_error)
+        _render_reasoning_settings_ui(settings_error=reasoning_error)
         st.chat_input("詢問...", disabled=True, key="studio_chat_no_session")
         return
 
@@ -765,26 +1086,19 @@ def render_chat_panel(
             else:
                 st.error(message)
         _render_tts_settings_ui(settings_error=settings_error)
+        _render_reasoning_settings_ui(settings_error=reasoning_error)
         st.chat_input("請先啟用 Agent...", disabled=True, key="studio_chat_not_activated")
         return
 
     with st.expander("技術資訊", expanded=False):
         st.caption(f"對話紀錄檔：{SESSION_DIR / current_session}")
         st.caption(f"語音設定檔：{TTS_CONFIG_PATH}")
-        st.caption(f"LLM 設定檔：{PEAS_AGENT_HOME / 'config.json'}")
+        st.caption(f"LLM 設定檔：{LLM_CONFIG_PATH}")
         if page_name:
             st.caption(f"目前頁面：{page_name}")
 
     _render_tts_settings_ui(settings_error=settings_error)
-
-    uploaded_image = st.file_uploader(
-        "附加圖片（選填）",
-        type=["png", "jpg", "jpeg", "webp"],
-        key=f"studio_chat_image_{current_session}",
-        help="圖片只會送給下一則訊息；支援 PNG/JPG/WEBP，大小上限 5 MB。",
-    )
-    if uploaded_image is not None:
-        st.image(uploaded_image, caption="下一則訊息會附上這張圖片", use_container_width=True)
+    _render_reasoning_settings_ui(settings_error=reasoning_error)
 
     try:
         agent = _get_agent_for_session(current_session)
@@ -803,47 +1117,146 @@ def render_chat_panel(
 
     chat = st.container(height=460, border=False)
     with chat:
-        for role, text in st.session_state["studio_chat_history"]:
-            with st.chat_message(role):
-                st.markdown(text)
+        for entry in st.session_state["studio_chat_history"]:
+            role, text, reasoning = _parse_history_entry(entry)
+            _render_history_message(role, text, reasoning=reasoning)
 
-    if user_text := st.chat_input("詢問 Agent...", key="studio_chat"):
-        image_path, image_error = _save_uploaded_chat_image(uploaded_image)
+    st.caption("輸入文字後 Enter 送出；可 Ctrl+V 貼圖，或點輸入框內圖片按鈕選檔（PNG/JPG/WEBP，上限 5 MB）。")
+    chatinput = multimodal_chatinput(
+        key=f"studio_multimodal_{current_session}",
+    )
+
+    should_process_submission = False
+    submission_token = ""
+    user_text = ""
+    pending_image: dict[str, Any] | None = None
+    image_path: str | None = None
+
+    if chatinput is not None:
+        submission_token = _chat_submission_token(chatinput)
+        if submission_token != st.session_state.get("studio_last_chat_submission_token"):
+            user_text = _multimodal_user_text(chatinput)
+            pending_image, image_error = _resolve_submission_image(chatinput)
+            if image_error:
+                st.warning(image_error)
+                pending_image = None
+            if user_text or pending_image is not None:
+                should_process_submission = True
+
+    if should_process_submission:
+        if pending_image is not None:
+            image_path, save_error = _save_chat_image_bytes(
+                pending_image["bytes"],
+                suffix=pending_image["suffix"],
+            )
+            if save_error:
+                st.warning(save_error)
+                image_path = None
+                pending_image = None
+            if not user_text and pending_image is None:
+                should_process_submission = False
+
+    if should_process_submission:
+        st.session_state["studio_last_chat_submission_token"] = submission_token
+
         display_user_text = user_text
-        if image_error:
-            st.warning(image_error)
-        elif image_path:
-            display_user_text = f"{user_text}\n\n（已附圖：{image_path}）"
+        if image_path:
+            attachment_note = user_text or "（已附圖，未輸入文字）"
+            display_user_text = f"{attachment_note}\n\n（已附圖：{image_path}）"
 
-        st.session_state["studio_chat_history"].append(("user", display_user_text))
-        parts: list[str] = []
-        page_prefix = _parent_story_prefix_for_page(page_name)
-        if page_prefix:
-            parts.append(page_prefix)
+        st.session_state["studio_chat_history"].append(("user", display_user_text, ""))
+
+        prompt_user_text = user_text or "（使用者只附上圖片，未輸入文字）"
         if extra_context.strip():
-            parts.append(f"【目前頁面狀態】\n{extra_context.strip()}")
-        if parts:
-            prompt = "\n\n".join(parts) + f"\n\n使用者問題：{user_text}"
+            prompt = f"【目前頁面狀態】\n{extra_context.strip()}\n\n使用者問題：{prompt_user_text}"
         else:
-            prompt = f"使用者問題：{user_text}"
+            prompt = f"使用者問題：{prompt_user_text}"
 
         with chat:
             with st.chat_message("user"):
-                st.markdown(user_text)
-                if uploaded_image is not None and image_path:
-                    st.image(uploaded_image, caption="已附圖", use_container_width=True)
+                if user_text:
+                    st.markdown(user_text)
+                elif image_path:
+                    st.markdown("（已附圖，未輸入文字）")
+                if pending_image is not None and image_path:
+                    st.image(pending_image["bytes"], caption="已附圖", use_container_width=True)
             with st.chat_message("assistant"):
+                reasoning_slot = st.empty()
                 placeholder = st.empty()
                 answer_parts: list[str] = []
+                reasoning_segments: list[str] = []
+                reasoning_parts: list[str] = []
+                stream_ui: dict[str, Any] = {
+                    "reasoning_ph": None,
+                    "visible": False,
+                    "expanded": False,
+                    "answer_started": False,
+                }
                 tts_settings = _build_tts_settings_for_playback()
                 if st.session_state.get("studio_tts_enabled") and tts_settings is None:
                     cfg = _load_tts_config()
                     if not str(cfg.get("api_key", "")).strip():
                         st.warning("語音已開啟，但 ~/.peas-agent/tts.json 尚未設定 api_key。")
+                    elif "@" not in str(cfg.get("model", "")).strip():
+                        st.warning(
+                            "語音已開啟，但 tts.json 的 model 必須使用 router 格式，"
+                            f"例如 `{DEFAULT_TTS_MODEL}`。"
+                        )
+
+                def _sync_reasoning_ui() -> None:
+                    text = _merged_reasoning_text(reasoning_segments, reasoning_parts)
+                    if not text:
+                        return
+                    expanded = not stream_ui["answer_started"]
+                    if expanded:
+                        if not stream_ui["visible"] or not stream_ui["expanded"]:
+                            _render_reasoning_expander(
+                                reasoning_slot,
+                                text,
+                                expanded=True,
+                                stream_ui=stream_ui,
+                            )
+                        elif stream_ui["reasoning_ph"] is not None:
+                            stream_ui["reasoning_ph"].markdown(text)
+                        else:
+                            _render_reasoning_expander(
+                                reasoning_slot,
+                                text,
+                                expanded=True,
+                                stream_ui=stream_ui,
+                            )
+                    else:
+                        _render_reasoning_expander(
+                            reasoning_slot,
+                            text,
+                            expanded=False,
+                            stream_ui=stream_ui,
+                        )
+
+                def on_reasoning(token: str) -> None:
+                    reasoning_parts.append(token)
+                    _sync_reasoning_ui()
 
                 def on_token(token: str) -> None:
+                    if not stream_ui["answer_started"]:
+                        stream_ui["answer_started"] = True
+                        _sync_reasoning_ui()
                     answer_parts.append(token)
                     placeholder.markdown("".join(answer_parts))
+
+                def on_stream_reset() -> None:
+                    _commit_reasoning_round(reasoning_segments, reasoning_parts)
+                    answer_parts.clear()
+                    stream_ui["answer_started"] = False
+                    placeholder.markdown(TOOL_RUN_PLACEHOLDER)
+                    merged = _merged_reasoning_text(reasoning_segments, reasoning_parts)
+                    if merged:
+                        _render_reasoning_expander(
+                            reasoning_slot,
+                            merged,
+                            expanded=True,
+                            stream_ui=stream_ui,
+                        )
 
                 try:
                     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
@@ -853,6 +1266,8 @@ def render_chat_panel(
                             prompt,
                             image_path=image_path,
                             on_token=on_token,
+                            on_reasoning=on_reasoning,
+                            on_stream_reset=on_stream_reset,
                         )
                 except Exception as exc:
                     final_text = f"Agent 執行時發生錯誤：`{exc}`"
@@ -861,12 +1276,16 @@ def render_chat_panel(
                 else:
                     answer = "".join(answer_parts).strip() or final_text.strip()
 
-                st.session_state["studio_chat_history"].append(("assistant", answer))
-                if on_assistant_reply is not None:
+                _commit_reasoning_round(reasoning_segments, reasoning_parts)
+                reasoning_text = _merged_reasoning_text(reasoning_segments, [])
+                st.session_state["studio_chat_history"].append(
+                    ("assistant", answer, reasoning_text)
+                )
+                if on_assistant_reply is not None and answer:
                     try:
-                        on_assistant_reply(answer, display_user_text)
+                        on_assistant_reply(answer, user_text)
                     except Exception as exc:
-                        st.warning(f"頁面狀態更新失敗（已保留對話）：`{exc}`")
+                        st.warning(f"頁面 hook 執行失敗：`{exc}`")
                 if tts_settings is not None and answer:
                     try:
                         stream_tts_play(answer, tts_settings)

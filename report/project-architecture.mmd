@@ -1,0 +1,25 @@
+flowchart LR
+  subgraph left [左欄網頁]
+    P10["人生故事書頁"]
+    Main["故事主線"]
+    Notes["訪談進度筆記"]
+    Facts["已蒐集事實"]
+    Sum["整理成 Agent 摘要"]
+  end
+  subgraph right [右欄 AI 助手]
+    Panel["聊天面板"]
+    Core["AI 大腦"]
+  end
+  subgraph store [資料存放]
+    Index["故事索引檔"]
+    Out["故事輸出檔"]
+  end
+  Main --> Sum
+  Notes --> Sum
+  Facts --> Sum
+  Sum -->|"每則問題附上左欄狀態"| Panel
+  Panel --> Core
+  Core -->|"Agent 回應寫回筆記與事實"| Notes
+  Core -->|"整理後輸出故事"| Out
+  P10 -->|"讀取故事索引"| Index
+  P10 -->|"寫入新故事"| Index

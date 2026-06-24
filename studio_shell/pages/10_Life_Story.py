@@ -61,14 +61,18 @@ Agent 每輪回應結尾會輸出兩個區塊，系統會自動寫進左欄：
 
 - **選擇故事（下拉選單）**：切換到列表中的其他故事；切換後左欄三個區塊會自動載入該故事的內容。
 - **➕ 新故事**：建立一個全新的空白故事，並自動切換為目前編輯對象。
-- **💾 存為快照**：把目前故事「凍結」複製一份（標題加「（快照）」、狀態設為已完成），原故事不動，可繼續編輯。
+- **💾 存為備份**：把目前故事「凍結」複製一份（標題加「（備份）」、狀態設為已完成），原故事不動，可繼續編輯。
 - **✅ 標記完成 / ↩️ 標記進行中**：切換目前故事的狀態（採訪中 ↔ 已完成），內容不變。
 - **🗑️ 刪除**：刪除目前故事（連同狀態檔）；刪除後會自動切到第一個剩下的故事。
 - **故事標題**：可隨時改名；改完會自動同步到索引檔。
 - **故事主線**：一句話寫下最想留下的那段故事。
 - **訪談進度筆記**：AI 每輪會自動 append 進度；您也可以手動補充關鍵字或場景。
 - **已蒐集事實**：每行一筆 `key：value`（例如 `主角：媽媽`），AI 會自動 merge；您也可以手動編輯。
-- **訪談時間軸**：顯示最近 10 輪的對話摘要（時間、使用者訊息、筆記、事實）。
+- **訪談時間軸**：顯示最近 10 輪的對話摘要（時間、使用者訊息、筆記、事實）。支援三種來源：
+  - 🤖 **Agent 自動記錄**：每輪 Agent 回應後自動 append。
+  - ✍️ **手動編輯偵測**：您直接改「進度筆記」或「事實」時，系統會自動 append 一筆異動紀錄。
+  - ➕ **手動新增**：在時間軸下方填寫訊息內容，按「➕ 加入時間軸」即可新增一筆。
+  - 每筆右側有「🗑️ 刪除此筆」可單獨移除。
 - **📄 匯出 Word / 📕 匯出 PDF**：把目前故事匯出成 `.docx` 或 `.pdf`，存到 `story_outputs/`。
 - **⬇️ 下載 Word / ⬇️ 下載 PDF**：把剛匯出的檔案下載到本機。
 - **給 Agent 的摘要**：把目前故事的狀態打包成一段文字，貼給 Agent 讓它接續採訪。
@@ -94,6 +98,94 @@ def _safe_filename(title: str) -> str:
     name = re.sub(r"[\\/:*?\"<>|]", "_", title or "未命名故事")
     name = name.strip().strip(".")
     return name or "未命名故事"
+
+
+# 七段式敘事骨架（背景 → 開端 → 衝突 → 決定 → 結果 → 意義 → 留給孩子的話）
+STORY_SKELETON = [
+    "背景",
+    "開端",
+    "衝突",
+    "決定",
+    "結果",
+    "意義",
+    "留給孩子的話",
+]
+
+
+def _compose_story(story: dict) -> str:
+    """把事實 + 進度筆記編織成連貫敘事 Markdown 草稿。
+
+    規則：
+    - 標題用 story.title
+    - 主線放最前面作為引子
+    - 依「背景 → 開端 → 衝突 → 決定 → 結果 → 意義 → 留給孩子的話」順序，
+      把對應的事實串成連貫敘事段落（不寫出小標題）
+    - 沒對應事實的段落就跳過，不留「待補」提示
+    - 沒被骨架對應到的事實，附加在主體之後
+    - 結尾附上「事實索引」與「進度筆記」附錄
+    """
+    title = story.get("title") or "未命名故事"
+    seed = (story.get("story_seed") or "").strip()
+    facts = story.get("collected_facts") or {}
+    notes = (story.get("progress_notes") or "").strip()
+
+    # 把 facts 轉成小寫 key 對照表，方便不分大小寫配對
+    facts_lower = {str(k).strip().lower(): (k, v) for k, v in facts.items() if k}
+
+    lines: list[str] = []
+    lines.append(f"# {title}")
+    lines.append("")
+    lines.append(f"*建立：{story.get('created_at', '')}　·　更新：{story.get('updated_at', '')}*")
+    lines.append("")
+
+    if seed:
+        lines.append(seed)
+        lines.append("")
+
+    # 依七段式順序串成連貫敘事（不寫小標題）
+    used_keys: set[str] = set()
+    for heading in STORY_SKELETON:
+        match_value = ""
+        match_key = ""
+        for low_key, (orig_key, value) in facts_lower.items():
+            if low_key == heading.lower() or heading in str(orig_key):
+                match_value = str(value).strip()
+                match_key = str(orig_key)
+                break
+        if match_value:
+            lines.append(match_value)
+            lines.append("")
+            used_keys.add(match_key)
+
+    # 沒被骨架對應到的事實，附加在主體之後
+    extra_facts = {k: v for k, v in facts.items() if k not in used_keys}
+    if extra_facts:
+        lines.append("---")
+        lines.append("")
+        for k, v in extra_facts.items():
+            lines.append(f"**{k}**：{v}")
+            lines.append("")
+
+    # 附錄：事實索引
+    if facts:
+        lines.append("---")
+        lines.append("")
+        lines.append("## 附錄：事實索引")
+        lines.append("")
+        for k, v in facts.items():
+            lines.append(f"- **{k}**：{v}")
+        lines.append("")
+
+    # 附錄：進度筆記
+    if notes:
+        lines.append("---")
+        lines.append("")
+        lines.append("## 附錄：訪談進度筆記")
+        lines.append("")
+        lines.append(notes)
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _build_story_sections(story: dict) -> list[tuple[str, str]]:
@@ -170,6 +262,149 @@ def _export_to_docx(story: dict, output_path: Path) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
+
+
+def _export_composed_to_docx(markdown_text: str, title: str, output_path: Path) -> None:
+    """把「完整故事」Markdown 草稿匯出成 .docx（簡單逐行轉換）。"""
+    from docx import Document
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    title_para = doc.add_heading(title or "未命名故事", level=0)
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            doc.add_paragraph()
+            continue
+        if line.startswith("# "):
+            # 已加過標題，跳過
+            continue
+        if line.startswith("## "):
+            doc.add_heading(line[3:].strip(), level=1)
+            continue
+        if line.startswith("### "):
+            doc.add_heading(line[4:].strip(), level=2)
+            continue
+        if line.startswith("---"):
+            # 分隔線：用一個空段
+            doc.add_paragraph("─" * 30)
+            continue
+        if line.startswith("*") and line.endswith("*") and len(line) > 2:
+            # 斜體中繼資訊
+            p = doc.add_paragraph()
+            run = p.add_run(line.strip("*").strip())
+            run.italic = True
+            run.font.size = Pt(9)
+            continue
+        if line.startswith("- "):
+            doc.add_paragraph(line[2:].strip(), style="List Bullet")
+            continue
+        doc.add_paragraph(line)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(output_path))
+
+
+def _export_composed_to_pdf(markdown_text: str, title: str, output_path: Path) -> None:
+    """把「完整故事」Markdown 草稿匯出成 .pdf（支援中文）。"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=A4,
+        leftMargin=2 * cm,
+        rightMargin=2 * cm,
+        topMargin=2 * cm,
+        bottomMargin=2 * cm,
+        title=title or "未命名故事",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleCN",
+        parent=styles["Title"],
+        fontName="STSong-Light",
+        fontSize=22,
+        leading=28,
+        alignment=1,
+        spaceAfter=12,
+    )
+    h1_style = ParagraphStyle(
+        "H1CN",
+        parent=styles["Heading1"],
+        fontName="STSong-Light",
+        fontSize=16,
+        leading=22,
+        spaceBefore=14,
+        spaceAfter=8,
+    )
+    h2_style = ParagraphStyle(
+        "H2CN",
+        parent=styles["Heading2"],
+        fontName="STSong-Light",
+        fontSize=13,
+        leading=18,
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    body_style = ParagraphStyle(
+        "BodyCN",
+        parent=styles["BodyText"],
+        fontName="STSong-Light",
+        fontSize=11,
+        leading=18,
+        spaceAfter=6,
+    )
+    meta_style = ParagraphStyle(
+        "MetaCN",
+        parent=styles["BodyText"],
+        fontName="STSong-Light",
+        fontSize=9,
+        leading=14,
+        alignment=1,
+        textColor="#666666",
+        spaceAfter=12,
+    )
+
+    flow = []
+    flow.append(Paragraph(_escape_xml(title or "未命名故事"), title_style))
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            flow.append(Spacer(1, 0.3 * cm))
+            continue
+        if line.startswith("# "):
+            continue  # 已加過標題
+        if line.startswith("## "):
+            flow.append(Paragraph(_escape_xml(line[3:].strip()), h1_style))
+            continue
+        if line.startswith("### "):
+            flow.append(Paragraph(_escape_xml(line[4:].strip()), h2_style))
+            continue
+        if line.startswith("---"):
+            flow.append(Spacer(1, 0.4 * cm))
+            continue
+        if line.startswith("*") and line.endswith("*") and len(line) > 2:
+            flow.append(Paragraph(_escape_xml(line.strip("*").strip()), meta_style))
+            continue
+        if line.startswith("- "):
+            flow.append(Paragraph("• " + _escape_xml(line[2:].strip()), body_style))
+            continue
+        flow.append(Paragraph(_escape_xml(line), body_style))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.build(flow)
 
 
 def _export_to_pdf(story: dict, output_path: Path) -> None:
@@ -523,22 +758,68 @@ def render_main() -> str:
     # ── 故事管理區塊 ──
     st.markdown("#### 📚 故事管理")
 
+    # 「建立新故事」表單狀態（按下 ➕ 後展開）
+    new_form_key = "_life_story_new_form_open"
+
+    def _open_new_form() -> None:
+        st.session_state[new_form_key] = True
+        st.session_state["_life_story_new_title_input"] = ""
+
+    def _close_new_form() -> None:
+        st.session_state[new_form_key] = False
+        st.session_state["_life_story_new_title_input"] = ""
+
+    def _create_and_switch(title: str) -> None:
+        story = _create_story(title, SHELL_ROOT)
+        index["stories"].append({
+            "id": story["id"],
+            "title": story["title"],
+            "created_at": story["created_at"],
+            "updated_at": story["updated_at"],
+            "status": "in_progress",
+        })
+        index["current_story_id"] = story["id"]
+        _save_index(index, SHELL_ROOT)
+        _close_new_form()
+        st.rerun()
+
     if not stories:
         st.info("還沒有故事。點下方「➕ 新故事」開始第一段。")
-        col_new, _ = st.columns([1, 5])
-        if col_new.button("➕ 新故事", type="primary", use_container_width=True):
-            new_title = f"故事 {datetime.now().strftime('%Y/%m/%d %H:%M')}"
-            story = _create_story(new_title, SHELL_ROOT)
-            index["stories"].append({
-                "id": story["id"],
-                "title": story["title"],
-                "created_at": story["created_at"],
-                "updated_at": story["updated_at"],
-                "status": "in_progress",
-            })
-            index["current_story_id"] = story["id"]
-            _save_index(index, SHELL_ROOT)
-            st.rerun()
+        if not st.session_state.get(new_form_key, False):
+            col_new, _ = st.columns([1, 5])
+            if col_new.button("➕ 新故事", type="primary", use_container_width=True):
+                _open_new_form()
+                st.rerun()
+        else:
+            # 展開輸入表單
+            with st.container():
+                st.markdown("##### ✏️ 為新故事命名")
+                new_title_input = st.text_input(
+                    "故事名稱",
+                    placeholder="例如：媽媽北上工作",
+                    key="_life_story_new_title_input",
+                )
+                col_ok, col_cancel = st.columns([1, 1])
+                ok_clicked = col_ok.button(
+                    "✅ 建立",
+                    type="primary",
+                    use_container_width=True,
+                    key="_life_story_new_ok",
+                )
+                cancel_clicked = col_cancel.button(
+                    "❌ 取消",
+                    use_container_width=True,
+                    key="_life_story_new_cancel",
+                )
+                if ok_clicked:
+                    title = (new_title_input or "").strip()
+                    if not title:
+                        st.warning("請輸入故事名稱")
+                    else:
+                        _create_and_switch(title)
+                if cancel_clicked:
+                    _close_new_form()
+                    st.rerun()
         return ""
 
     # 選擇器
@@ -563,24 +844,45 @@ def render_main() -> str:
 
     btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
     new_clicked = btn_col1.button("➕ 新故事", use_container_width=True)
-    snapshot_clicked = btn_col2.button("💾 存為快照", use_container_width=True)
+    snapshot_clicked = btn_col2.button("💾 存為備份", use_container_width=True)
     complete_label = "↩️ 標記進行中" if is_completed else "✅ 標記完成"
     complete_clicked = btn_col3.button(complete_label, use_container_width=True)
     delete_clicked = btn_col4.button("🗑️ 刪除", type="secondary", use_container_width=True)
 
     if new_clicked:
-        new_title = f"故事 {datetime.now().strftime('%Y/%m/%d %H:%M')}"
-        story = _create_story(new_title, SHELL_ROOT)
-        index["stories"].append({
-            "id": story["id"],
-            "title": story["title"],
-            "created_at": story["created_at"],
-            "updated_at": story["updated_at"],
-            "status": "in_progress",
-        })
-        index["current_story_id"] = story["id"]
-        _save_index(index, SHELL_ROOT)
+        _open_new_form()
         st.rerun()
+
+    # 「建立新故事」表單（按下 ➕ 後展開）
+    if st.session_state.get(new_form_key, False):
+        with st.container():
+            st.markdown("##### ✏️ 為新故事命名")
+            new_title_input = st.text_input(
+                "故事名稱",
+                placeholder="例如：媽媽北上工作",
+                key="_life_story_new_title_input",
+            )
+            col_ok, col_cancel = st.columns([1, 1])
+            ok_clicked = col_ok.button(
+                "✅ 建立",
+                type="primary",
+                use_container_width=True,
+                key="_life_story_new_ok",
+            )
+            cancel_clicked = col_cancel.button(
+                "❌ 取消",
+                use_container_width=True,
+                key="_life_story_new_cancel",
+            )
+            if ok_clicked:
+                title = (new_title_input or "").strip()
+                if not title:
+                    st.warning("請輸入故事名稱")
+                else:
+                    _create_and_switch(title)
+            if cancel_clicked:
+                _close_new_form()
+                st.rerun()
 
     if snapshot_clicked and current_id:
         story = _load_story(current_id, SHELL_ROOT)
@@ -588,7 +890,7 @@ def render_main() -> str:
             snapshot_id = f"{current_id}_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             snapshot = dict(story)
             snapshot["id"] = snapshot_id
-            snapshot["title"] = f"{story.get('title', '')}（快照）"
+            snapshot["title"] = f"{story.get('title', '')}（備份）"
             snapshot["status"] = "completed"
             _save_story(snapshot, SHELL_ROOT)
             index["stories"].append({
@@ -599,7 +901,7 @@ def render_main() -> str:
                 "status": "completed",
             })
             _save_index(index, SHELL_ROOT)
-            st.success(f"已存快照：{snapshot['title']}")
+            st.success(f"已存備份：{snapshot['title']}")
 
     if complete_clicked and current_id:
         story = _load_story(current_id, SHELL_ROOT)
@@ -686,19 +988,120 @@ def render_main() -> str:
     timeline = story.get("timeline", [])
     if not isinstance(timeline, list):
         timeline = []
+
+    # ── 自動偵測「手動編輯」並 append 時間軸 ──
+    # 用 session_state 記住上次存檔的快照，比對差異
+    notes_sig_key = f"_life_story_last_notes_sig_{current_id}"
+    facts_sig_key = f"_life_story_last_facts_sig_{current_id}"
+    notes_sig_now = hashlib.md5(progress_notes.encode("utf-8")).hexdigest()
+    facts_sig_now = hashlib.md5(facts_text.encode("utf-8")).hexdigest()
+
+    notes_prev = st.session_state.get(notes_sig_key)
+    facts_prev = st.session_state.get(facts_sig_key)
+
+    # 第一次進入此故事：只記錄快照，不 append
+    if notes_prev is None:
+        st.session_state[notes_sig_key] = notes_sig_now
+    elif notes_prev != notes_sig_now:
+        # 進度筆記被改過了
+        timeline.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "user": "（手動編輯進度筆記）",
+            "agent_excerpt": "",
+            "notes_added": f"更新進度筆記（{len(progress_notes)} 字）",
+            "facts_added": [],
+            "source": "manual_edit",
+        })
+        st.session_state[notes_sig_key] = notes_sig_now
+
+    if facts_prev is None:
+        st.session_state[facts_sig_key] = facts_sig_now
+    elif facts_prev != facts_sig_now:
+        # 事實被改過了：算出新增/修改的 keys
+        old_facts = _text_to_facts(st.session_state.get(f"_life_story_last_facts_text_{current_id}", ""))
+        new_facts = edited_facts
+        added_keys = [k for k in new_facts.keys() if k not in old_facts]
+        changed_keys = [k for k in new_facts.keys() if k in old_facts and old_facts[k] != new_facts[k]]
+        removed_keys = [k for k in old_facts.keys() if k not in new_facts]
+        diff_keys = added_keys + changed_keys + removed_keys
+        if diff_keys:
+            timeline.append({
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "user": "（手動編輯事實）",
+                "agent_excerpt": "",
+                "notes_added": f"異動：{', '.join(diff_keys)}",
+                "facts_added": diff_keys,
+                "source": "manual_edit",
+            })
+        st.session_state[facts_sig_key] = facts_sig_now
+        st.session_state[f"_life_story_last_facts_text_{current_id}"] = facts_text
+
+    # 初始化事實快照（給下一輪比對用）
+    if f"_life_story_last_facts_text_{current_id}" not in st.session_state:
+        st.session_state[f"_life_story_last_facts_text_{current_id}"] = facts_text
+
     with st.expander(f"訪談時間軸（{len(timeline)} 輪，顯示最近 10 輪）", expanded=False):
         if not timeline:
             st.caption("（尚無紀錄）")
-        for entry in timeline[-10:]:
-            ts = entry.get("ts", "")
-            user = entry.get("user", "")
-            notes = entry.get("notes_added", "")
-            facts_added = entry.get("facts_added", [])
-            st.markdown(f"**[{ts}]** 使用者：{user}")
-            if notes:
-                st.markdown(f"　→ 筆記：{notes}")
-            if facts_added:
-                st.markdown(f"　→ 事實：{', '.join(facts_added)}")
+        else:
+            # 顯示最近 10 輪（由新到舊）
+            recent = timeline[-10:][::-1]
+            for idx, entry in enumerate(recent):
+                ts = entry.get("ts", "")
+                user = entry.get("user", "")
+                notes = entry.get("notes_added", "")
+                facts_added = entry.get("facts_added", [])
+                source = entry.get("source", "agent")
+                source_icon = "✍️" if source == "manual_edit" else ("🤖" if source == "agent" else "📝")
+                if source == "manual_add":
+                    source_icon = "➕"
+                st.markdown(f"{source_icon} **[{ts}]** {user}")
+                if notes:
+                    st.markdown(f"　→ 筆記：{notes}")
+                if facts_added:
+                    st.markdown(f"　→ 事實：{', '.join(facts_added)}")
+                # 刪除單筆按鈕
+                real_idx = len(timeline) - 1 - idx
+                del_key = f"del_timeline_{current_id}_{real_idx}"
+                if st.button("🗑️ 刪除此筆", key=del_key, use_container_width=False):
+                    timeline.pop(real_idx)
+                    story["timeline"] = timeline
+                    _save_story(story, SHELL_ROOT)
+                    # 重置快照，避免下次又把同一份編輯當成新異動
+                    st.session_state[notes_sig_key] = hashlib.md5(progress_notes.encode("utf-8")).hexdigest()
+                    st.session_state[facts_sig_key] = hashlib.md5(facts_text.encode("utf-8")).hexdigest()
+                    st.rerun()
+
+        st.divider()
+        # ── 手動新增記錄 ──
+        st.markdown("**➕ 手動新增一筆紀錄**")
+        manual_col1, manual_col2 = st.columns([3, 1])
+        manual_msg = manual_col1.text_input(
+            "訊息內容",
+            placeholder="例如：訪談結束，今天聊到決定北上那一刻",
+            key=f"manual_timeline_msg_{current_id}",
+        )
+        manual_notes = manual_col2.text_input(
+            "筆記（可選）",
+            placeholder="關鍵字",
+            key=f"manual_timeline_notes_{current_id}",
+        )
+        if st.button("➕ 加入時間軸", key=f"btn_manual_timeline_{current_id}", use_container_width=True):
+            if manual_msg.strip() or manual_notes.strip():
+                timeline.append({
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "user": manual_msg.strip() or "（手動記錄）",
+                    "agent_excerpt": "",
+                    "notes_added": manual_notes.strip(),
+                    "facts_added": [],
+                    "source": "manual_add",
+                })
+                story["timeline"] = timeline
+                _save_story(story, SHELL_ROOT)
+                st.success("已加入時間軸")
+                st.rerun()
+            else:
+                st.warning("請至少填寫「訊息內容」或「筆記」其中一欄")
 
     # ── 存檔 ──
     story["story_seed"] = story_seed
@@ -765,6 +1168,109 @@ def render_main() -> str:
                 file_name=pdf_filename,
                 mime="application/pdf",
                 use_container_width=True,
+            )
+
+    st.divider()
+
+    # ── 完整故事預覽（七段式編織） ──
+    st.markdown("#### 📖 完整故事預覽")
+    st.caption(
+        "把「故事主線 + 已蒐集事實 + 訪談進度筆記」依「背景 → 開端 → 衝突 → 決定 → 結果 → 意義 → 留給孩子的話」"
+        "的順序串成連貫敘事（不寫小標題）；可直接編輯後匯出 Word / PDF / Markdown。"
+    )
+
+    # 自動生成草稿（若使用者尚未編輯過，或按下「重新生成」）
+    auto_draft = _compose_story(story)
+    edited_key = "life_story_composed_md"
+    regen_key = "life_story_composed_regen"
+
+    if edited_key not in st.session_state:
+        st.session_state[edited_key] = auto_draft
+
+    regen_col, _ = st.columns([1, 5])
+    if regen_col.button("🔄 重新從事實生成草稿", use_container_width=True):
+        st.session_state[edited_key] = auto_draft
+        st.session_state[regen_key] = datetime.now().isoformat(timespec="seconds")
+
+    composed_md = st.text_area(
+        "故事草稿（可直接編輯）",
+        value=st.session_state[edited_key],
+        height=320,
+        key=edited_key,
+    )
+
+    # 預覽（用 Markdown 渲染）
+    with st.expander("👀 預覽渲染結果", expanded=False):
+        st.markdown(composed_md)
+
+    # 匯出按鈕
+    composed_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    composed_safe = _safe_filename(story.get("title", "未命名故事"))
+    composed_docx_name = f"{composed_safe}_完整故事_{composed_stamp}.docx"
+    composed_pdf_name = f"{composed_safe}_完整故事_{composed_stamp}.pdf"
+    composed_md_name = f"{composed_safe}_完整故事_{composed_stamp}.md"
+    composed_docx_path = export_dir / composed_docx_name
+    composed_pdf_path = export_dir / composed_pdf_name
+    composed_md_path = export_dir / composed_md_name
+
+    exp_c1, exp_c2, exp_c3 = st.columns(3)
+    with exp_c1:
+        if st.button("📄 匯出 Word", key="btn_export_composed_docx", use_container_width=True):
+            try:
+                _export_composed_to_docx(composed_md, story.get("title", "未命名故事"), composed_docx_path)
+                st.session_state["_life_story_last_composed_docx"] = str(composed_docx_path)
+                st.success(f"已匯出：{composed_docx_name}")
+            except Exception as exc:
+                st.error(f"Word 匯出失敗：`{exc}`")
+    with exp_c2:
+        if st.button("📕 匯出 PDF", key="btn_export_composed_pdf", use_container_width=True):
+            try:
+                _export_composed_to_pdf(composed_md, story.get("title", "未命名故事"), composed_pdf_path)
+                st.session_state["_life_story_last_composed_pdf"] = str(composed_pdf_path)
+                st.success(f"已匯出：{composed_pdf_name}")
+            except Exception as exc:
+                st.error(f"PDF 匯出失敗：`{exc}`")
+    with exp_c3:
+        if st.button("📝 匯出 Markdown", key="btn_export_composed_md", use_container_width=True):
+            try:
+                composed_md_path.parent.mkdir(parents=True, exist_ok=True)
+                composed_md_path.write_text(composed_md, encoding="utf-8")
+                st.session_state["_life_story_last_composed_md"] = str(composed_md_path)
+                st.success(f"已匯出：{composed_md_name}")
+            except Exception as exc:
+                st.error(f"Markdown 匯出失敗：`{exc}`")
+
+    # 下載按鈕（檔案存在才顯示）
+    dl_c1, dl_c2, dl_c3 = st.columns(3)
+    if composed_docx_path.is_file():
+        with dl_c1:
+            st.download_button(
+                "⬇️ 下載 Word",
+                data=composed_docx_path.read_bytes(),
+                file_name=composed_docx_name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="dl_composed_docx",
+            )
+    if composed_pdf_path.is_file():
+        with dl_c2:
+            st.download_button(
+                "⬇️ 下載 PDF",
+                data=composed_pdf_path.read_bytes(),
+                file_name=composed_pdf_name,
+                mime="application/pdf",
+                use_container_width=True,
+                key="dl_composed_pdf",
+            )
+    if composed_md_path.is_file():
+        with dl_c3:
+            st.download_button(
+                "⬇️ 下載 Markdown",
+                data=composed_md_path.read_bytes(),
+                file_name=composed_md_name,
+                mime="text/markdown",
+                use_container_width=True,
+                key="dl_composed_md",
             )
 
     st.divider()

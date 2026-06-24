@@ -5,6 +5,68 @@ from pathlib import Path
 
 import streamlit as st
 
+_MULTIMODAL_CHATINPUT_THEME_FIX = """
+<script>
+(function () {
+  const host = window.parent;
+  if (!host || host.__studioMultimodalChatinputThemeFixInstalled) {
+    return;
+  }
+  host.__studioMultimodalChatinputThemeFixInstalled = true;
+
+  function patchIframe(iframe) {
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc || doc.__studioMultimodalChatinputThemeFixApplied) {
+        return;
+      }
+      doc.__studioMultimodalChatinputThemeFixApplied = true;
+
+      const style = doc.createElement("style");
+      style.textContent = `
+        textarea {
+          color: var(--text-color) !important;
+          caret-color: var(--text-color) !important;
+        }
+        textarea::placeholder {
+          color: color-mix(in srgb, var(--text-color) 55%, transparent) !important;
+          opacity: 1;
+        }
+      `;
+      doc.head.appendChild(style);
+    } catch (_err) {
+      /* ignore cross-origin iframes */
+    }
+  }
+
+  function patchAll() {
+    host.document.querySelectorAll("iframe").forEach((iframe) => {
+      if (iframe.contentDocument) {
+        patchIframe(iframe);
+      } else {
+        iframe.addEventListener("load", () => patchIframe(iframe), { once: true });
+      }
+    });
+  }
+
+  patchAll();
+  new MutationObserver(patchAll).observe(host.document.body, {
+    childList: true,
+    subtree: true,
+  });
+})();
+</script>
+"""
+
+
+_THEME_FIX_IFRAME_HEIGHT = 1
+
+
+def inject_multimodal_chatinput_theme_fix() -> None:
+    """st-multimodal-chatinput hardcodes white textarea text; fix for light themes."""
+    # st.iframe rejects height=0; use 1px (legacy components.html allowed 0).
+    st.iframe(_MULTIMODAL_CHATINPUT_THEME_FIX, height=_THEME_FIX_IFRAME_HEIGHT)
+
 
 def inject_style() -> None:
     st.markdown(
@@ -31,39 +93,11 @@ def inject_style() -> None:
 """,
         unsafe_allow_html=True,
     )
+    inject_multimodal_chatinput_theme_fix()
 
 
 def page_slug(page_name: str) -> str:
-    """Return a filesystem-friendly slug for JSON filename.
-
-    CJK characters (Chinese/Japanese/Korean) are kept as-is; ASCII spaces become
-    underscores. This keeps paths stable while allowing Chinese filenames on
-    modern filesystems. For other scripts, NFKD transliteration is applied.
-    """
-    import re
-    import unicodedata
-
-    text = page_name.strip()
-    normalized = unicodedata.normalize("NFKD", text)
-    # Encode then decode ASCII to transliterate Latin/Greek/etc., but restore
-    # CJK characters which have no ASCII equivalent.
-    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
-
-    # Re-insert CJK blocks that were stripped by encode('ascii', 'ignore')
-    restored_chars: list[str] = []
-    ascii_idx = 0
-    for char in normalized:
-        if "\u4e00" <= char <= "\u9fff" or "\u3400" <= char <= "\u4dbf" or "\uf900" <= char <= "\ufaff":
-            restored_chars.append(char)
-        else:
-            if ascii_idx < len(ascii_text):
-                restored_chars.append(ascii_text[ascii_idx])
-                ascii_idx += 1
-    restored = "".join(restored_chars)
-
-    slug = "_".join(restored.split())
-    slug = re.sub(r"[^\w\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff-]", "", slug, flags=re.UNICODE)
-    return slug or "page"
+    return page_name.strip().lower()
 
 
 def shared_data_path(page_name: str, *, shell_root: Path) -> Path:
