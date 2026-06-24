@@ -13,8 +13,14 @@ def page_shell(
     render_main: Callable[[], str | None],
     *,
     page_name: str = "",
+    on_assistant_reply: Callable[[str, str], None] | None = None,
 ) -> None:
-    """Left column UI + right column Agent. render_main returns extra_context for Agent."""
+    """Left column UI + right column Agent. render_main returns extra_context for Agent.
+
+    on_assistant_reply: optional callback invoked after each Agent reply.
+        Signature: (assistant_text: str, user_text: str) -> None
+        Use this to auto-update page state (e.g. append to progress notes).
+    """
 
     main, side = st.columns([5, 3], gap="large")
 
@@ -24,4 +30,8 @@ def page_shell(
         extra_context = render_main() or ""
 
     with side:
-        render_chat_panel(extra_context=extra_context, page_name=page_name or title)
+        render_chat_panel(
+            extra_context=extra_context,
+            page_name=page_name or title,
+            on_assistant_reply=on_assistant_reply,
+        )

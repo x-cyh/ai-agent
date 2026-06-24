@@ -59,8 +59,64 @@ def _tts_voice_label(voice_id: str) -> str:
     return voice_id
 
 
+# 為「人生故事書」頁面提供精準的 parent-story 採訪指引。
+# 優先動態讀取 .agents/skills/parent-story/SKILL.md（改 skill 檔即生效），
+# 讀不到時才 fallback 到下方 hard-coded 字串，避免影響其他頁面。
+PARENT_STORY_SKILL_PATH = PROJECT_ROOT / ".agents" / "skills" / "parent-story" / "SKILL.md"
+
+PARENT_STORY_PROMPT_PREFIX = """
+【parent-story 採訪指引】
+你正在協助使用者留下一段人生故事給孩子或家人。請嚴格遵守以下流程：
+
+1. 先找到「主線」：如果還沒確認，問「如果今天只能先留下一段故事，您最想從哪一件事開始說起？」
+2. 主線確認後，一次只問一題，依序追問：
+   a. 背景：那時候幾歲？家庭／工作／生活狀態是什麼？
+   b. 開端：這件事是怎麼開始的？什麼變化讓它展開？
+   c. 衝突：最難熬的是什麼？最卡住的地方在哪裡？
+   d. 決定：最後做了什麼選擇？為什麼那樣決定？
+   e. 結果：後來結果怎麼樣？有什麼收穫、遺憾或代價？
+   f. 意義：回頭看，這件事改變了什麼？如何塑造了現在的自己？
+   g. 留給孩子的話：希望孩子記住哪個畫面或心意？最後一句叮嚀是什麼？
+3. 回答太短時，優先溫和補問細節：「可以多說一點當時發生了什麼嗎？」、「那個畫面裡還有誰？」
+4. 回答太抽象時，拉回具體事件：「最辛苦的那一天發生了什麼？」
+5. 主線尚未成形前，不要跳到支線；不要在故事還沒講完整前急著總結。
+6. 資訊足夠後，整理輸出：故事標題、主線摘要、故事正文、留給孩子的話；並將結果用 write_file 工具寫到 story_outputs/ 目錄的 .md 檔案，檔名使用「{timestamp}_{故事標題}.md」的格式。
+""".strip()
+
+
 def _display_path(path: Path) -> str:
     return path.resolve().as_posix()
+
+
+def _load_parent_story_skill_body() -> str | None:
+    """讀取 parent-story SKILL.md 並去掉 frontmatter，回傳內文。
+
+    找不到檔案或讀取失敗時回傳 None，由 caller 決定是否 fallback。
+    """
+    path = PARENT_STORY_SKILL_PATH
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    # 去掉 YAML frontmatter（--- 開頭到下一個 --- 為止）
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            text = parts[2]
+    return text.strip() or None
+
+
+def _parent_story_prefix_for_page(page_name: str) -> str:
+    if page_name not in ("人生故事書", "Parent Story"):
+        return ""
+
+    body = _load_parent_story_skill_body()
+    if body:
+        return f"【parent-story skill 內容】\n{body}"
+    return PARENT_STORY_PROMPT_PREFIX
 
 
 def _ensure_peas_dirs() -> None:
@@ -604,7 +660,12 @@ def _restore_agent_core_if_possible(session_name: str) -> tuple[bool, str | None
     return False, message
 
 
-def render_chat_panel(*, extra_context: str = "", page_name: str = "") -> None:
+def render_chat_panel(
+    *,
+    extra_context: str = "",
+    page_name: str = "",
+    on_assistant_reply=None,
+) -> None:
     migration_message = _maybe_migrate_legacy_data()
     if migration_message:
         st.info(migration_message)
@@ -755,8 +816,14 @@ def render_chat_panel(*, extra_context: str = "", page_name: str = "") -> None:
             display_user_text = f"{user_text}\n\n（已附圖：{image_path}）"
 
         st.session_state["studio_chat_history"].append(("user", display_user_text))
+        parts: list[str] = []
+        page_prefix = _parent_story_prefix_for_page(page_name)
+        if page_prefix:
+            parts.append(page_prefix)
         if extra_context.strip():
-            prompt = f"【目前頁面狀態】\n{extra_context.strip()}\n\n使用者問題：{user_text}"
+            parts.append(f"【目前頁面狀態】\n{extra_context.strip()}")
+        if parts:
+            prompt = "\n\n".join(parts) + f"\n\n使用者問題：{user_text}"
         else:
             prompt = f"使用者問題：{user_text}"
 
@@ -795,6 +862,11 @@ def render_chat_panel(*, extra_context: str = "", page_name: str = "") -> None:
                     answer = "".join(answer_parts).strip() or final_text.strip()
 
                 st.session_state["studio_chat_history"].append(("assistant", answer))
+                if on_assistant_reply is not None:
+                    try:
+                        on_assistant_reply(answer, display_user_text)
+                    except Exception as exc:
+                        st.warning(f"頁面狀態更新失敗（已保留對話）：`{exc}`")
                 if tts_settings is not None and answer:
                     try:
                         stream_tts_play(answer, tts_settings)

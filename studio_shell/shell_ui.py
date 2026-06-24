@@ -34,7 +34,36 @@ def inject_style() -> None:
 
 
 def page_slug(page_name: str) -> str:
-    return page_name.strip().lower()
+    """Return a filesystem-friendly slug for JSON filename.
+
+    CJK characters (Chinese/Japanese/Korean) are kept as-is; ASCII spaces become
+    underscores. This keeps paths stable while allowing Chinese filenames on
+    modern filesystems. For other scripts, NFKD transliteration is applied.
+    """
+    import re
+    import unicodedata
+
+    text = page_name.strip()
+    normalized = unicodedata.normalize("NFKD", text)
+    # Encode then decode ASCII to transliterate Latin/Greek/etc., but restore
+    # CJK characters which have no ASCII equivalent.
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+
+    # Re-insert CJK blocks that were stripped by encode('ascii', 'ignore')
+    restored_chars: list[str] = []
+    ascii_idx = 0
+    for char in normalized:
+        if "\u4e00" <= char <= "\u9fff" or "\u3400" <= char <= "\u4dbf" or "\uf900" <= char <= "\ufaff":
+            restored_chars.append(char)
+        else:
+            if ascii_idx < len(ascii_text):
+                restored_chars.append(ascii_text[ascii_idx])
+                ascii_idx += 1
+    restored = "".join(restored_chars)
+
+    slug = "_".join(restored.split())
+    slug = re.sub(r"[^\w\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff-]", "", slug, flags=re.UNICODE)
+    return slug or "page"
 
 
 def shared_data_path(page_name: str, *, shell_root: Path) -> Path:

@@ -56,7 +56,7 @@ pages = {
         st.Page(str(SHELL_ROOT / "pages" / "2_Playground.py"), title="Playground"),
         st.Page(str(SHELL_ROOT / "pages" / "3_UI_Cheatsheet.py"), title="UI 元件詞彙表"),
         st.Page(str(SHELL_ROOT / "pages" / "8_Runner_Menu.py"), title="Runner"),
-        st.Page(str(SHELL_ROOT / "pages" / "9_Smart_Assistant.py"), title="智慧助手"),
+        st.Page(str(SHELL_ROOT / "pages" / "10_Life_Story.py"), title="人生故事書"),
     ],
 }
 
